@@ -196,9 +196,9 @@ def calculate_actual(
     table_deduct_min = calc_table_deduction(presence_hours)
     total_deduct_min = table_deduct_min + lunch_extra_min + other_deduct_min
 
-    # Net çalışma = bulunma − tablo kesintisi
-    # (lunch_extra ve other zaten şirket dışında geçirildi)
-    net_work_min   = presence_min - table_deduct_min
+    # Net çalışma = bulunma − tüm kesintiler
+    # (presence içinde hem dışarıdaki süreler hem de tablo kesintisi var)
+    net_work_min   = presence_min - table_deduct_min - lunch_extra_min - other_deduct_min
     filter_loss_min = int((raw_exit - eff_exit).total_seconds() // 60)
 
     # Hangi mesai kategorisine denk geliyor?
@@ -235,7 +235,7 @@ def calculate_actual(
 # ─────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Mesai Hesaplama Aracı",
+    page_title="mesTâi",
     page_icon="🕐",
     layout="wide",
 )
@@ -375,7 +375,7 @@ st.markdown("""
 # ── Hero ──────────────────────────────────────
 st.markdown("""
 <div class="hero">
-  <h1>🕐 Mesai Hesaplama Aracı</h1>
+  <h1>🕐 mesTâi</h1>
   <p>Giriş saatinizi, mola sürelerinizi ve hedef kategoriyi girin — çıkış saatinizi otomatik hesaplayalım.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -390,32 +390,6 @@ with st.sidebar:
         value=datetime.strptime("08:00", "%H:%M").time(),
         step=60,
         help="Kartınızı okuttuğunuz / kapıdan geçtiğiniz saat.",
-    )
-
-    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
-    st.markdown("**🥗 Öğle Arası (11:30–13:30)**")
-    lunch_min = st.number_input(
-        "Öğle arası süresi (dakika)",
-        min_value=0, max_value=180, value=0, step=5,
-        help="Sadece öğle arasına ait dışarıda geçirilen süre. "
-             "İlk 60 dk ücretsizdir; fazlası mesaiden kesilir.",
-    )
-
-    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
-    st.markdown("**☕ Diğer Şirket Dışı Çıkışlar**")
-    other_min = st.number_input(
-        "Diğer çıkış süresi (dakika)",
-        min_value=0, max_value=240, value=0, step=5,
-        help="Öğle dışı tüm dışarı çıkışların toplamı. Tamamı mesaiden kesilir.",
-    )
-
-    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
-    target_label = st.selectbox(
-        "Hedeflenen Mesai Kategorisi",
-        options=list(TARGET_CATEGORIES.keys()),
-        index=2,          # "Normal mesai" varsayılan
-        help="Ulaşmak istediğiniz mesai seviyesi. "
-             "'Normal mesai' = 08:00–17:00 = 9 sa şirkette, 8 sa net.",
     )
 
     st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
@@ -434,6 +408,35 @@ with st.sidebar:
             step=60,
             help="Kartınızı okuttuğunuz / kapıdan çıktığınız gerçek saat.",
         )
+
+    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
+    st.markdown("**🥗 Öğle Arası (11:30–13:30)**")
+    lunch_min = st.number_input(
+        "Öğle arası süresi (dakika)",
+        min_value=0, max_value=180, value=0, step=5,
+        help="Sadece öğle arasına ait dışarıda geçirilen süre. "
+             "İlk 60 dk ücretsizdir; fazlası mesaiden kesilir.",
+    )
+
+    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
+    st.markdown("**☕ Diğer Şirket Dışı Çıkışlar**")
+    other_min = st.number_input(
+        "Diğer çıkış süresi (dakika)",
+        min_value=0, max_value=240, value=0, step=5,
+        help="Öğle dışı tüm dışarı çıkışların toplamı. Tamamı mesaiden kesilir.",
+    )
+
+    if not use_actual_exit:
+        st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
+        target_label = st.selectbox(
+            "Hedeflenen Mesai Kategorisi",
+            options=list(TARGET_CATEGORIES.keys()),
+            index=2,
+            help="Ulaşmak istediğiniz mesai seviyesi. "
+                 "'Normal mesai' = 08:00–17:00 = 9 sa şirkette, 8 sa net.",
+        )
+    else:
+        target_label = list(TARGET_CATEGORIES.keys())[2]  # kullanılmaz ama tanımlı olsun
 
     st.markdown("---")
     st.markdown("""
