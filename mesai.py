@@ -159,6 +159,78 @@ def calculate(
 
 
 # ─────────────────────────────────────────────
+# GERÇEKLEŞEN MESAİ HESAPLAMA MOTORU
+# ─────────────────────────────────────────────
+#
+# Kullanıcı gerçek çıkış saatini girince:
+#   1. Giriş + çıkış filtrelerini uygula
+#   2. Şirkette bulunma süresi = eff_exit - eff_entry  (dakika)
+#   3. Tablo kesintisini bulunma süresine göre bul
+#   4. Öğle ve diğer mola kesintilerini uygula
+#   5. Net çalışma = bulunma - tablo_kesinti
+#      (lunch_extra ve other zaten dışarıda geçti, net'e dahil değil)
+
+def calculate_actual(
+    raw_entry_str  : str,
+    raw_exit_str   : str,
+    lunch_min      : int,
+    other_min      : int,
+) -> dict:
+
+    raw_entry = parse_hhmm(raw_entry_str)
+    raw_exit  = parse_hhmm(raw_exit_str)
+
+    eff_entry = apply_entry_filter(raw_entry)
+    eff_exit  = apply_exit_filter(raw_exit)
+
+    if eff_exit <= eff_entry:
+        return {"is_valid": False}
+
+    # Bulunma süresi (dakika & saat)
+    presence_min   = int((eff_exit - eff_entry).total_seconds() // 60)
+    presence_hours = presence_min / 60
+
+    # Kesintiler
+    lunch_extra_min  = calc_lunch_deduction(lunch_min)
+    other_deduct_min = other_min
+    table_deduct_min = calc_table_deduction(presence_hours)
+    total_deduct_min = table_deduct_min + lunch_extra_min + other_deduct_min
+
+    # Net çalışma = bulunma − tablo kesintisi
+    # (lunch_extra ve other zaten şirket dışında geçirildi)
+    net_work_min   = presence_min - table_deduct_min
+    filter_loss_min = int((raw_exit - eff_exit).total_seconds() // 60)
+
+    # Hangi mesai kategorisine denk geliyor?
+    matched_category = None
+    for label, cat_hours in TARGET_CATEGORIES.items():
+        if abs(presence_hours - cat_hours) < 0.01:
+            matched_category = label
+            break
+
+    return {
+        "is_valid"           : True,
+        "raw_entry"          : format_hhmm(raw_entry),
+        "eff_entry"          : format_hhmm(eff_entry),
+        "entry_adjusted"     : raw_entry != eff_entry,
+        "raw_exit"           : format_hhmm(raw_exit),
+        "eff_exit"           : format_hhmm(eff_exit),
+        "exit_adjusted"      : raw_exit != eff_exit,
+        "filter_loss_min"    : filter_loss_min,
+        "presence_min"       : presence_min,
+        "presence_hours"     : presence_hours,
+        "lunch_min"          : lunch_min,
+        "lunch_extra_min"    : lunch_extra_min,
+        "other_min"          : other_deduct_min,
+        "table_deduct_min"   : table_deduct_min,
+        "total_deduct_min"   : total_deduct_min,
+        "net_work_min"       : net_work_min,
+        "net_work_hours"     : net_work_min / 60,
+        "matched_category"   : matched_category,
+    }
+
+
+# ─────────────────────────────────────────────
 # STREAMLIT ARAYÜZÜ
 # ─────────────────────────────────────────────
 
@@ -271,6 +343,31 @@ st.markdown("""
         color: #b45309;
         margin-bottom: 6px;
     }
+    .actual-net-box {
+        background: linear-gradient(135deg, #064e3b, #065f46);
+        border-radius: 14px;
+        padding: 24px 28px;
+        color: white;
+        text-align: center;
+        margin-bottom: 12px;
+    }
+    .actual-net-box .label { font-size: 0.72rem; opacity: 0.75; letter-spacing: 0.1em; text-transform: uppercase; }
+    .actual-net-box .time  { font-size: 3.4rem; font-weight: 700; letter-spacing: -1px; line-height: 1.1; }
+    .actual-net-box .sub   { font-size: 0.8rem; opacity: 0.65; margin-top: 6px; }
+    .mode-badge-plan {
+        display: inline-block;
+        background: #eef2ff; color: #3730a3;
+        border-radius: 20px; padding: 3px 12px;
+        font-size: 0.73rem; font-weight: 600;
+        margin-bottom: 14px;
+    }
+    .mode-badge-actual {
+        display: inline-block;
+        background: #d1fae5; color: #065f46;
+        border-radius: 20px; padding: 3px 12px;
+        font-size: 0.73rem; font-weight: 600;
+        margin-bottom: 14px;
+    }
     .section-sep { margin: 18px 0 10px; border: none; border-top: 1px solid #e0e3ed; }
 </style>
 """, unsafe_allow_html=True)
@@ -321,6 +418,23 @@ with st.sidebar:
              "'Normal mesai' = 08:00–17:00 = 9 sa şirkette, 8 sa net.",
     )
 
+    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
+    st.markdown("**🚪 Gerçek Çıkış Saati** *(opsiyonel)*")
+    use_actual_exit = st.checkbox(
+        "Çıkış saatimi girdim, net mesaimi hesapla",
+        value=False,
+        help="İşaretlerseniz sistem 'çıkış saati hesaplama' yerine "
+             "'gerçekleşen net mesai' moduna geçer.",
+    )
+    actual_exit_time = None
+    if use_actual_exit:
+        actual_exit_time = st.time_input(
+            "Gerçek Çıkış Saati",
+            value=datetime.strptime("17:00", "%H:%M").time(),
+            step=60,
+            help="Kartınızı okuttuğunuz / kapıdan çıktığınız gerçek saat.",
+        )
+
     st.markdown("---")
     st.markdown("""
     <div class="card-title">Sabit Kurallar</div>
@@ -335,113 +449,218 @@ with st.sidebar:
 
 # ── Hesaplama ─────────────────────────────────
 entry_str = entry_time.strftime("%H:%M")
-result    = calculate(
-    raw_entry_str = entry_str,
-    lunch_min     = lunch_min,
-    other_min     = other_min,
-    target_label  = target_label,
-)
 
-# ── Sonuçlar ──────────────────────────────────
-col_main, col_detail = st.columns([1, 1.65], gap="large")
+if use_actual_exit and actual_exit_time is not None:
+    # ══ MOD: Gerçekleşen Mesai ══
+    actual_exit_str = actual_exit_time.strftime("%H:%M")
+    ar = calculate_actual(
+        raw_entry_str = entry_str,
+        raw_exit_str  = actual_exit_str,
+        lunch_min     = lunch_min,
+        other_min     = other_min,
+    )
 
-with col_main:
-    if not result["is_valid"]:
-        st.markdown("""
-        <div class="warn-box">
-        ⚠️ <strong>Geçersiz hesaplama:</strong> Hesaplanan çıkış saati giriş saatinden önce.
-        Lütfen giriş saatini veya mola sürelerini kontrol edin.
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        sub_text = (
-            f"Ham: {result['raw_exit']} → filtre uygulandı"
-            if result["exit_adjusted"]
-            else "Çıkış filtresi uygulanmadı"
+    col_main, col_detail = st.columns([1, 1.65], gap="large")
+
+    with col_main:
+        st.markdown('<div class="mode-badge-actual">✅ Gerçekleşen Mesai Modu</div>', unsafe_allow_html=True)
+
+        if not ar["is_valid"]:
+            st.markdown("""
+            <div class="warn-box">
+            ⚠️ <strong>Geçersiz:</strong> Çıkış saati giriş saatinden önce.
+            Saatleri kontrol edin.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            exit_sub = (
+                f"Ham: {ar['raw_exit']} → filtre uygulandı"
+                if ar["exit_adjusted"] else "Çıkış filtresi uygulanmadı"
+            )
+            st.markdown(f"""
+            <div class="actual-net-box">
+              <div class="label">Net Çalışma Süresi</div>
+              <div class="time">{hours_to_label(ar['net_work_hours'])}</div>
+              <div class="sub">Çıkış: {ar['eff_exit']} &nbsp;|&nbsp; {exit_sub}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Filtre kaybı uyarısı
+            if ar["exit_adjusted"] and ar["filter_loss_min"] > 0:
+                loss = ar["filter_loss_min"]
+                actual_net_min = ar["net_work_min"] - loss
+                ah, am = divmod(actual_net_min, 60)
+                st.markdown(f"""
+                <div class="filter-loss-box">
+                  <div class="fl-title">⚠️ Çıkış Filtresi Nedeniyle Eksik Mesai</div>
+                  Ham çıkış saatiniz <strong>{ar['raw_exit']}</strong> iken
+                  <strong>17:00–18:00 filtresi</strong> nedeniyle <strong>{ar['eff_exit']}</strong>
+                  olarak kaydedildi.<br>
+                  Bu durum <strong>{loss} dakika</strong> mesai kaybına yol açıyor.<br><br>
+                  Yukarıdaki net mesai filtrelenmiş saate göre hesaplanmıştır.<br><br>
+                  💡 <em>HR ile telafi talebinde bulunabilirsiniz.</em>
+                </div>
+                """, unsafe_allow_html=True)
+
+            if ar["entry_adjusted"]:
+                st.markdown(f"""
+                <div class="adj-note">
+                ℹ️ Giriş <strong>{ar['raw_entry']}</strong>, 07:00–08:00 aralığında olduğundan
+                <strong>{ar['eff_entry']}</strong> kabul edildi.
+                </div>
+                """, unsafe_allow_html=True)
+
+    with col_detail:
+        st.markdown('<div class="card-title">Hesaplama Detayı</div>', unsafe_allow_html=True)
+
+        d1, d2 = st.columns(2)
+        d1.metric("Efektif Giriş",     ar["eff_entry"])
+        d2.metric("Efektif Çıkış",     ar["eff_exit"])
+
+        d3, d4 = st.columns(2)
+        d3.metric(
+            "Şirkette Bulunma",
+            hours_to_label(ar["presence_hours"]),
+            help="Efektif giriş ile efektif çıkış arasındaki süre.",
         )
-        st.markdown(f"""
-        <div class="exit-time-box">
-          <div class="label">Hesaplanan Çıkış Saati</div>
-          <div class="time">{result['eff_exit']}</div>
-          <div class="sub">{sub_text}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── Filtre kaybı uyarısı ──────────────────
-    if result["exit_adjusted"] and result["filter_loss_min"] > 0:
-        loss = result["filter_loss_min"]
-        actual_net_min = result["net_work_min"] - loss
-        ah, am = divmod(actual_net_min, 60)
-        st.markdown(f"""
-        <div class="filter-loss-box">
-          <div class="fl-title">⚠️ Çıkış Filtresi Nedeniyle Eksik Mesai</div>
-          Ham çıkış saatiniz <strong>{result['raw_exit']}</strong> iken sistem
-          <strong>17:00–18:00 filtresi</strong> nedeniyle <strong>{result['eff_exit']}</strong>
-          olarak kaydedildi.<br>
-          Bu durum <strong>{loss} dakika</strong> mesai kaybına yol açıyor.<br><br>
-          Hedef net çalışma: <strong>{hours_to_label(result['net_work_hours'])}</strong> &nbsp;→&nbsp;
-          Gerçekleşen net çalışma: <strong>{ah}sa {am:02d}dk</strong><br><br>
-          💡 <em>Bu farkı kapatmak için yarın <strong>{loss} dakika erken girmenizi</strong>
-          veya HR ile telafi talebinde bulunmanızı öneririz.</em>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if result["entry_adjusted"]:
-        st.markdown(f"""
-        <div class="adj-note">
-        ℹ️ Giriş <strong>{result['raw_entry']}</strong>, 07:00–08:00 aralığında olduğundan
-        <strong>{result['eff_entry']}</strong> kabul edildi.
-        </div>
-        """, unsafe_allow_html=True)
-
-with col_detail:
-    st.markdown('<div class="card-title">Hesaplama Detayı</div>', unsafe_allow_html=True)
-
-    r1, r2 = st.columns(2)
-    r1.metric("Efektif Giriş",        result["eff_entry"])
-    r2.metric(
-        "Şirkette Bulunma",
-        hours_to_label(result["presence_hours"]),
-        help="Hedeflenen kapıdan-kapıya süre.",
-    )
-
-    r3, r4 = st.columns(2)
-    r3.metric(
-        "Öğle Aşım Kesintisi",
-        f"{result['lunch_extra_min']} dk",
-        help=f"Öğle: {result['lunch_min']} dk — İlk 60 dk ücretsiz, aşan kesilir.",
-    )
-    r4.metric(
-        "Diğer Mola Kesintisi",
-        f"{result['other_min']} dk",
-        help="Diğer çıkışların tamamı kesilir.",
-    )
-
-    r5, r6 = st.columns(2)
-    r5.metric(
-        "Tablo Kesintisi",
-        f"{result['table_deduct_min']} dk",
-        help="Şirkette bulunma süresine göre kesinti tablosundan.",
-    )
-    r6.metric(
-        "Toplam Kesinti",
-        f"{result['total_deduct_min']} dk",
-    )
-
-    r7, r8 = st.columns(2)
-    r7.metric(
-        "Net Çalışma Süresi",
-        hours_to_label(result["net_work_hours"]),
-        help="Şirkette bulunma − tablo kesintisi. (Dışarıda geçirilen süreler zaten sayılmaz.)",
-    )
-    r8.metric("Çıkış Saati", result["eff_exit"])
-
-    if result["filter_loss_min"] > 0:
-        st.markdown(
-            f"🟠 **Filtre kaybı:** Çıkış filtresi nedeniyle "
-            f"**{result['filter_loss_min']} dk** mesai sisteme yansımadı. "
-            f"Ham çıkış: {result['raw_exit']} → Kayıtlı: {result['eff_exit']}",
+        d4.metric(
+            "Tablo Kesintisi",
+            f"{ar['table_deduct_min']} dk",
+            help="Bulunma süresine göre kesinti tablosundan.",
         )
+
+        d5, d6 = st.columns(2)
+        d5.metric(
+            "Öğle Aşım Kesintisi",
+            f"{ar['lunch_extra_min']} dk",
+            help=f"Öğle: {ar['lunch_min']} dk — İlk 60 dk ücretsiz.",
+        )
+        d6.metric(
+            "Diğer Mola Kesintisi",
+            f"{ar['other_min']} dk",
+            help="Diğer çıkışların tamamı kesilir.",
+        )
+
+        d7, d8 = st.columns(2)
+        d7.metric("Toplam Kesinti",    f"{ar['total_deduct_min']} dk")
+        d8.metric("Net Çalışma",       hours_to_label(ar["net_work_hours"]))
+
+        if ar["filter_loss_min"] > 0:
+            st.markdown(
+                f"🟠 **Filtre kaybı:** **{ar['filter_loss_min']} dk** sisteme yansımadı. "
+                f"Ham: {ar['raw_exit']} → Kayıtlı: {ar['eff_exit']}",
+            )
+
+else:
+    # ══ MOD: Planlama (Çıkış Hesaplama) ══
+    result = calculate(
+        raw_entry_str = entry_str,
+        lunch_min     = lunch_min,
+        other_min     = other_min,
+        target_label  = target_label,
+    )
+
+    col_main, col_detail = st.columns([1, 1.65], gap="large")
+
+    with col_main:
+        st.markdown('<div class="mode-badge-plan">🗓️ Planlama Modu</div>', unsafe_allow_html=True)
+
+        if not result["is_valid"]:
+            st.markdown("""
+            <div class="warn-box">
+            ⚠️ <strong>Geçersiz hesaplama:</strong> Hesaplanan çıkış saati giriş saatinden önce.
+            Lütfen giriş saatini veya mola sürelerini kontrol edin.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            sub_text = (
+                f"Ham: {result['raw_exit']} → filtre uygulandı"
+                if result["exit_adjusted"]
+                else "Çıkış filtresi uygulanmadı"
+            )
+            st.markdown(f"""
+            <div class="exit-time-box">
+              <div class="label">Hesaplanan Çıkış Saati</div>
+              <div class="time">{result['eff_exit']}</div>
+              <div class="sub">{sub_text}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Filtre kaybı uyarısı
+        if result["exit_adjusted"] and result["filter_loss_min"] > 0:
+            loss = result["filter_loss_min"]
+            actual_net_min = result["net_work_min"] - loss
+            ah, am = divmod(actual_net_min, 60)
+            st.markdown(f"""
+            <div class="filter-loss-box">
+              <div class="fl-title">⚠️ Çıkış Filtresi Nedeniyle Eksik Mesai</div>
+              Ham çıkış saatiniz <strong>{result['raw_exit']}</strong> iken sistem
+              <strong>17:00–18:00 filtresi</strong> nedeniyle <strong>{result['eff_exit']}</strong>
+              olarak kaydedildi.<br>
+              Bu durum <strong>{loss} dakika</strong> mesai kaybına yol açıyor.<br><br>
+              Hedef net çalışma: <strong>{hours_to_label(result['net_work_hours'])}</strong> &nbsp;→&nbsp;
+              Gerçekleşen net çalışma: <strong>{ah}sa {am:02d}dk</strong><br><br>
+              💡 <em>Bu farkı kapatmak için yarın <strong>{loss} dakika erken girmenizi</strong>
+              veya HR ile telafi talebinde bulunmanızı öneririz.</em>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if result["entry_adjusted"]:
+            st.markdown(f"""
+            <div class="adj-note">
+            ℹ️ Giriş <strong>{result['raw_entry']}</strong>, 07:00–08:00 aralığında olduğundan
+            <strong>{result['eff_entry']}</strong> kabul edildi.
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col_detail:
+        st.markdown('<div class="card-title">Hesaplama Detayı</div>', unsafe_allow_html=True)
+
+        r1, r2 = st.columns(2)
+        r1.metric("Efektif Giriş",        result["eff_entry"])
+        r2.metric(
+            "Şirkette Bulunma",
+            hours_to_label(result["presence_hours"]),
+            help="Hedeflenen kapıdan-kapıya süre.",
+        )
+
+        r3, r4 = st.columns(2)
+        r3.metric(
+            "Öğle Aşım Kesintisi",
+            f"{result['lunch_extra_min']} dk",
+            help=f"Öğle: {result['lunch_min']} dk — İlk 60 dk ücretsiz, aşan kesilir.",
+        )
+        r4.metric(
+            "Diğer Mola Kesintisi",
+            f"{result['other_min']} dk",
+            help="Diğer çıkışların tamamı kesilir.",
+        )
+
+        r5, r6 = st.columns(2)
+        r5.metric(
+            "Tablo Kesintisi",
+            f"{result['table_deduct_min']} dk",
+            help="Şirkette bulunma süresine göre kesinti tablosundan.",
+        )
+        r6.metric(
+            "Toplam Kesinti",
+            f"{result['total_deduct_min']} dk",
+        )
+
+        r7, r8 = st.columns(2)
+        r7.metric(
+            "Net Çalışma Süresi",
+            hours_to_label(result["net_work_hours"]),
+            help="Şirkette bulunma − tablo kesintisi.",
+        )
+        r8.metric("Çıkış Saati", result["eff_exit"])
+
+        if result["filter_loss_min"] > 0:
+            st.markdown(
+                f"🟠 **Filtre kaybı:** Çıkış filtresi nedeniyle "
+                f"**{result['filter_loss_min']} dk** mesai sisteme yansımadı. "
+                f"Ham çıkış: {result['raw_exit']} → Kayıtlı: {result['eff_exit']}",
+            )
 
 # ── Kural / Tablo Expander ───────────────────
 st.markdown("---")
