@@ -135,6 +135,9 @@ def calculate(
     net_work_min  = int(presence_hours * 60) - table_deduct_min
     # (lunch ve other zaten dışarıda geçirildi, net çalışmaya dahil değil)
 
+    # Filtre kaybı: çıkış filtresi ham saati geri çektiyse kaybedilen dakika
+    filter_loss_min = int((raw_exit - eff_exit).total_seconds() // 60)
+
     return {
         "raw_entry"          : format_hhmm(raw_entry),
         "eff_entry"          : format_hhmm(eff_entry),
@@ -148,6 +151,7 @@ def calculate(
         "raw_exit"           : format_hhmm(raw_exit),
         "eff_exit"           : format_hhmm(eff_exit),
         "exit_adjusted"      : raw_exit != eff_exit,
+        "filter_loss_min"    : filter_loss_min,
         "net_work_min"       : net_work_min,
         "net_work_hours"     : net_work_min / 60,
         "is_valid"           : eff_exit > eff_entry,
@@ -248,6 +252,25 @@ st.markdown("""
         color: #3d4fd6;
         margin-top: 10px;
     }
+    .filter-loss-box {
+        background: #fff8ec;
+        border: 1.5px solid #f59e0b;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-top: 12px;
+        color: #78350f;
+        font-size: 0.86rem;
+        line-height: 1.55;
+    }
+    .filter-loss-box strong { color: #92400e; }
+    .filter-loss-box .fl-title {
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: #b45309;
+        margin-bottom: 6px;
+    }
     .section-sep { margin: 18px 0 10px; border: none; border-top: 1px solid #e0e3ed; }
 </style>
 """, unsafe_allow_html=True)
@@ -344,6 +367,25 @@ with col_main:
         </div>
         """, unsafe_allow_html=True)
 
+    # ── Filtre kaybı uyarısı ──────────────────
+    if result["exit_adjusted"] and result["filter_loss_min"] > 0:
+        loss = result["filter_loss_min"]
+        actual_net_min = result["net_work_min"] - loss
+        ah, am = divmod(actual_net_min, 60)
+        st.markdown(f"""
+        <div class="filter-loss-box">
+          <div class="fl-title">⚠️ Çıkış Filtresi Nedeniyle Eksik Mesai</div>
+          Ham çıkış saatiniz <strong>{result['raw_exit']}</strong> iken sistem
+          <strong>17:00–18:00 filtresi</strong> nedeniyle <strong>{result['eff_exit']}</strong>
+          olarak kaydedildi.<br>
+          Bu durum <strong>{loss} dakika</strong> mesai kaybına yol açıyor.<br><br>
+          Hedef net çalışma: <strong>{hours_to_label(result['net_work_hours'])}</strong> &nbsp;→&nbsp;
+          Gerçekleşen net çalışma: <strong>{ah}sa {am:02d}dk</strong><br><br>
+          💡 <em>Bu farkı kapatmak için yarın <strong>{loss} dakika erken girmenizi</strong>
+          veya HR ile telafi talebinde bulunmanızı öneririz.</em>
+        </div>
+        """, unsafe_allow_html=True)
+
     if result["entry_adjusted"]:
         st.markdown(f"""
         <div class="adj-note">
@@ -393,6 +435,13 @@ with col_detail:
         help="Şirkette bulunma − tablo kesintisi. (Dışarıda geçirilen süreler zaten sayılmaz.)",
     )
     r8.metric("Çıkış Saati", result["eff_exit"])
+
+    if result["filter_loss_min"] > 0:
+        st.markdown(
+            f"🟠 **Filtre kaybı:** Çıkış filtresi nedeniyle "
+            f"**{result['filter_loss_min']} dk** mesai sisteme yansımadı. "
+            f"Ham çıkış: {result['raw_exit']} → Kayıtlı: {result['eff_exit']}",
+        )
 
 # ── Kural / Tablo Expander ───────────────────
 st.markdown("---")
